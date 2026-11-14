@@ -5,6 +5,7 @@ using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -19,8 +20,10 @@ if (insecure) handler.ServerCertificateCustomValidationCallback = HttpClientHand
 using var http = new HttpClient(handler) { BaseAddress = baseUri };
 
 const string Password = "my-strong-password-1930@#!";
+const int MaxValueLength = 64;
 var passed = 0;
 var failed = new List<string>();
+var log = new List<string>();
 
 Console.WriteLine($"Testing account service at {baseUrl}");
 try
@@ -165,13 +168,14 @@ await Test("95% of registrations finish in under 500 ms", async () =>
     for (var i = 0; i < 20; i++)
     {
         var watch = Stopwatch.StartNew();
-        var res = await Send(HttpMethod.Post, "/v1/accounts", Registration(NewEmail()));
+        var res = await Send(HttpMethod.Post, "/v1/accounts", Registration(NewEmail()), show: i == 0);
         times.Add(watch.Elapsed.TotalMilliseconds);
         ExpectStatus(res, HttpStatusCode.Accepted);
     }
     times.Sort();
     var p95 = times[(int)Math.Ceiling(times.Count * 0.95) - 1];
-    Console.WriteLine($"        p95 {p95:F0} ms, max {times[^1]:F0} ms");
+    Note("(19 more registrations like this one)");
+    Note($"p95 {p95:F0} ms, max {times[^1]:F0} ms");
     Expect(p95 < 500, $"p95 was {p95:F0} ms");
 });
 
@@ -226,17 +230,49 @@ void Section(string name) => Console.WriteLine($"\n{name}");
 
 async Task Test(string name, Func<Task> body)
 {
+    log.Clear();
     try
     {
         await body();
         passed++;
         Console.WriteLine($"  PASS  {name}");
+        PrintLog();
     }
     catch (Exception e)
     {
         failed.Add(name);
-        Console.WriteLine($"  FAIL  {name}\n        {e.Message}");
+        Console.WriteLine($"  FAIL  {name}");
+        PrintLog();
+        Console.WriteLine($"        FAILED: {e.Message}");
     }
+    Console.WriteLine();
+}
+
+void PrintLog() => log.ForEach(line => Console.WriteLine($"        {line}"));
+
+void Note(string line) => log.Add(line);
+
+string Shorten(string text)
+{
+    JsonNode? node;
+    try { node = JsonNode.Parse(text); } catch (JsonException) { return text; }
+    var changed = false;
+    void Walk(JsonNode? n)
+    {
+        if (n is JsonObject obj)
+            foreach (var (key, value) in obj.ToList())
+            {
+                if (value is JsonValue v && v.TryGetValue<string>(out var str) && str.Length > MaxValueLength)
+                {
+                    obj[key] = $"{str[..MaxValueLength]}... ({str.Length} chars)";
+                    changed = true;
+                }
+                else Walk(value);
+            }
+        else if (n is JsonArray arr) arr.ToList().ForEach(Walk);
+    }
+    Walk(node);
+    return changed ? node!.ToJsonString(new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping }) : text;
 }
 
 void Expect(bool condition, string message)
@@ -269,15 +305,27 @@ string NewIp() => $"10.{Random.Shared.Next(256)}.{Random.Shared.Next(256)}.{Rand
 
 object Registration(string email, string password = Password, string displayName = "Tester") => new { email, password, displayName };
 
-async Task<Response> Send(HttpMethod method, string path, object? body = null, string? token = null, string? ip = null, string? rawBody = null)
+async Task<Response> Send(HttpMethod method, string path, object? body = null, string? token = null, string? ip = null, string? rawBody = null, bool show = true)
 {
     using var req = new HttpRequestMessage(method, path);
-    if (body != null || rawBody != null)
-        req.Content = new StringContent(rawBody ?? JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+    var sent = body != null ? JsonSerializer.Serialize(body) : rawBody;
+    if (sent != null) req.Content = new StringContent(sent, Encoding.UTF8, "application/json");
     if (token != null) req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
     req.Headers.Add("X-Forwarded-For", ip ?? NewIp());
+    if (show)
+    {
+        Note($"> {method} {path}");
+        if (token != null) Note($"  Authorization: Bearer {token}");
+        if (sent != null) Note($"  {Shorten(sent)}");
+    }
     using var res = await http.SendAsync(req);
     var text = await res.Content.ReadAsStringAsync();
+    if (show)
+    {
+        Note($"< {(int)res.StatusCode} {res.StatusCode}");
+        if (res.Headers.RetryAfter != null) Note($"  Retry-After: {res.Headers.RetryAfter}");
+        if (text.Length > 0) Note($"  {Shorten(text)}");
+    }
     JsonNode? json = null;
     try { if (text.Length > 0) json = JsonNode.Parse(text); } catch (JsonException) { }
     return new Response(res.StatusCode, text, json, res.Headers.RetryAfter);
