@@ -1,3 +1,11 @@
+# Requirements
+
+Email must be `name@domain.tld`. Must be unique.
+
+Password must be at least 8 characters.
+
+Display Name 1-40 characters (trimmed whitespace)
+
 # Schema
 
 /v1/accounts, POST, Body: email, password, displayName 
