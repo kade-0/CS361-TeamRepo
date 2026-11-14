@@ -91,16 +91,20 @@ function queueEmail(accountId, template) {
 
 const registerTx = db.transaction((email, passwordHash, displayName) => {
   const existing = findAccountByEmail(email);
-  if (existing) return queueEmail(existing.id, "account_exists");
+  if (existing) {
+    queueEmail(existing.id, "account_exists");
+    return { accountId: existing.id, created: false, template: "account_exists" };
+  }
   const id = crypto.randomUUID();
   db.prepare("INSERT INTO accounts (id, email, display_name, password_hash) VALUES (?, ?, ?, ?)").run(id, email, displayName, passwordHash);
   queueEmail(id, "verify_email");
+  return { accountId: id, created: true, template: "verify_email" };
 });
 
 async function registerAccount(email, password, displayName) {
   // always hash first so taken and new emails take the same time
   const passwordHash = await hashPassword(password);
-  registerTx(email, passwordHash, displayName);
+  return registerTx(email, passwordHash, displayName);
 }
 
 // access token functions

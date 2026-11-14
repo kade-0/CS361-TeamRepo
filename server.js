@@ -3,6 +3,7 @@ const fs = require("fs");
 const https = require("https");
 const store = require("./db");
 const { rateLimit } = require("./ratelimit");
+const { log, maskEmail, requestLogger } = require("./logger");
 
 const PORT = process.env.PORT || 4000;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -23,7 +24,10 @@ function accountView(account) {
 function requireAuth(req, res, next) {
   const [scheme, token] = (req.get("Authorization") || "").split(" ");
   const account = scheme === "Bearer" && token && store.findAccountByToken(token);
-  if (!account) return res.status(401).json({ error: "Missing or invalid access token." });
+  if (!account) {
+    log(req, "auth.rejected", { reason: token ? "invalid_token" : "missing_token" });
+    return res.status(401).json({ error: "Missing or invalid access token." });
+  }
   req.account = account;
   req.token = token;
   next();
@@ -62,8 +66,13 @@ function validateRegistration({ email, password, displayName }) {
 
 async function handleRegister(req, res) {
   const fields = validateRegistration(req.body || {});
-  if (fields) return res.status(400).json({ error: "Please fix the highlighted fields.", fields });
-  await store.registerAccount(req.body.email.trim(), req.body.password, req.body.displayName.trim());
+  if (fields) {
+    log(req, "register.rejected", { fields: Object.keys(fields).join(",") });
+    return res.status(400).json({ error: "Please fix the highlighted fields.", fields });
+  }
+  const result = await store.registerAccount(req.body.email.trim(), req.body.password, req.body.displayName.trim());
+  log(req, result.created ? "account.created" : "register.email_taken", { account: result.accountId, email: maskEmail(req.body.email) });
+  log(req, "email.queued", { template: result.template, account: result.accountId });
   res.status(202).json({ message: REGISTERED_MESSAGE });
 }
 
@@ -73,20 +82,24 @@ async function handleLogin(req, res) {
   const { email, password } = req.body || {};
   const account = typeof email === "string" && store.findAccountByEmail(email.trim());
   if (!account || typeof password !== "string" || !(await store.verifyPassword(password, account.password_hash))) {
+    log(req, "login.failed", { email: maskEmail(email), reason: account ? "wrong_password" : "unknown_email" });
     return res.status(401).json({ error: "Incorrect email or password." });
   }
   const { token, expiresAt } = store.issueAccessToken(account.id);
+  log(req, "login.success", { account: account.id });
   res.json({ accessToken: token, tokenType: "Bearer", expiresAt, account: accountView(account) });
 }
 
 function handleLogout(req, res) {
   store.revokeAccessToken(req.token);
+  log(req, "logout", { account: req.account.id });
   res.status(204).end();
 }
 
 // current account handler function
 
 function handleMe(req, res) {
+  log(req, "account.viewed", { account: req.account.id });
   res.json(accountView(req.account));
 }
 
@@ -106,6 +119,7 @@ function setupRoutes(app) {
   // for rate limiting to work correctly behind a reverse proxy, we need to trust the proxy (e.g. Cloudflare).
   app.set("trust proxy", process.env.TRUST_PROXY || "loopback");
   
+  app.use(requestLogger);
   app.use(express.json({ limit: "10kb" }));
   app.post("/v1/accounts", rateLimit({ windowMs: 60 * 1000, max: 5 }), wrap(handleRegister));
   app.post("/v1/accounts/verify-email", notImplemented);
@@ -119,8 +133,12 @@ function setupRoutes(app) {
   app.post("/v1/auth/password-reset/confirm", notImplemented);
   app.use((req, res) => res.status(404).json({ error: "Not found." }));
   app.use((err, req, res, next) => {
-    if (err.type === "entity.parse.failed") return res.status(400).json({ error: "Request body must be valid JSON." });
+    if (err.type === "entity.parse.failed") {
+      log(req, "request.bad_json", { path: req.path });
+      return res.status(400).json({ error: "Request body must be valid JSON." });
+    }
     // log only the error itself, never the request body (it may hold a password)
+    log(req, "error", { path: req.path, message: JSON.stringify(err.message) });
     console.error(err.stack || err.message);
     res.status(500).json({ error: "Something went wrong. Try again." });
   });

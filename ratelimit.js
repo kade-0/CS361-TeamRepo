@@ -1,3 +1,5 @@
+const { log } = require("./logger");
+
 // simple in-memory fixed window rate limiter, keyed by client IP unless a key function is given
 
 function rateLimit({ windowMs, max, key = req => req.ip }) {
@@ -17,6 +19,7 @@ function rateLimit({ windowMs, max, key = req => req.ip }) {
     }
     entry.count++;
     if (entry.count <= max) return next();
+    log(req, "rate_limited", { path: req.path, count: entry.count });
     res.set("Retry-After", Math.ceil((entry.resetAt - now) / 1000));
     res.status(429).json({ error: "Too many requests. Wait a minute and try again." });
   };
