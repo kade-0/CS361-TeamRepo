@@ -64,8 +64,9 @@ def normalize_event(e):
     t = e.get("time") or {}
     el, extra = t.get("elapsed") or 0, t.get("extra") or 0
     return {"minute": el, "extra": extra, "clock": f"{el}'+{extra}'" if extra else f"{el}'",
-            "team": (e.get("team") or {}).get("name"), "player": (e.get("player") or {}).get("name"),
-            "assist": (e.get("assist") or {}).get("name"), "type": EVENT_TYPES.get(e.get("type"), "other"),
+            "team": (e.get("team") or {}).get("name"), "team_id": (e.get("team") or {}).get("id"),
+            "player": (e.get("player") or {}).get("name"), "player_id": (e.get("player") or {}).get("id"),
+            "assist": (e.get("assist") or {}).get("name"), "assist_id": (e.get("assist") or {}).get("id"), "type": EVENT_TYPES.get(e.get("type"), "other"),
             "detail": e.get("detail"), "comments": e.get("comments")}
 
 
@@ -106,3 +107,68 @@ def analyze_match(fixture, stat_blocks, events):
     return {"match": match, "statistics_available": ok, "teams": {"home": home, "away": away} if ok else None,
             "dominance": dom, "key_moments": [e for e in evs if is_key_moment(e)],
             "summary": _summary(match, ok, dom, home, away)}
+
+
+# ---------------------------------------------------------------- player analysis
+def _rate(part, whole):
+    return round(100 * part / whole, 1) if whole else 0.0
+
+
+def player_row(team_name, entry, team_id=None):
+    st = (entry.get("statistics") or [{}])[0]
+    g, sh, go, pa = (st.get(k) or {} for k in ("games", "shots", "goals", "passes"))
+    du, dr, ta, fo, ca = (st.get(k) or {} for k in ("duels", "dribbles", "tackles", "fouls", "cards"))
+    n = lambda v: to_number(v, 0)
+    row = {"player_id": (entry.get("player") or {}).get("id"), "name": (entry.get("player") or {}).get("name"),
+           "team_id": team_id, "team": team_name, "position": g.get("position"),
+           "minutes": n(g.get("minutes")), "rating": to_number(g.get("rating"), None),
+           "goals": n(go.get("total")), "assists": n(go.get("assists")),
+           "shots_total": n(sh.get("total")), "shots_on_target": n(sh.get("on")),
+           "key_passes": n(pa.get("key")), "passes_total": n(pa.get("total")),
+           "duels_total": n(du.get("total")), "duels_won": n(du.get("won")),
+           "dribbles_attempted": n(dr.get("attempts")), "dribbles_success": n(dr.get("success")),
+           "tackles": n(ta.get("total")), "interceptions": n(ta.get("interceptions")),
+           "fouls_committed": n(fo.get("committed")), "fouls_drawn": n(fo.get("drawn")),
+           "yellow_cards": n(ca.get("yellow")), "red_cards": n(ca.get("red"))}
+    row["shot_accuracy"] = _rate(row["shots_on_target"], row["shots_total"])
+    row["duel_win_rate"] = _rate(row["duels_won"], row["duels_total"])
+    row["dribble_success_rate"] = _rate(row["dribbles_success"], row["dribbles_attempted"])
+    return row
+
+
+def player_rows(blocks):
+    """Flatten the provider's per-team player lists. Unused substitutes (no minutes) are dropped."""
+    rows = []
+    for b in blocks:
+        for entry in b.get("players", []):
+            row = player_row((b.get("team") or {}).get("name"), entry, (b.get("team") or {}).get("id"))
+            if row["minutes"] > 0:
+                rows.append(row)
+    return rows
+
+
+def _leader(rows, key, minimum=1, label=None):
+    pool = [r for r in rows if (r[key] or 0) >= minimum]
+    if not pool:
+        return None
+    best = max(pool, key=lambda r: r[key])
+    return {"player_id": best["player_id"], "player": best["name"], "team": best["team"], "value": best[key]}
+
+
+def leaders(rows):
+    """Standout player in each area. Rates need a minimum sample so one dribble can't win."""
+    out = {"rating": _leader([r for r in rows if r["rating"] is not None], "rating"),
+           "goals": _leader(rows, "goals"), "assists": _leader(rows, "assists"),
+           "key_passes": _leader(rows, "key_passes"), "shots": _leader(rows, "shots_total"),
+           "tackles": _leader(rows, "tackles")}
+    out["duel_win_rate"] = _leader([r for r in rows if r["duels_total"] >= 5], "duel_win_rate")
+    out["dribble_success_rate"] = _leader([r for r in rows if r["dribbles_attempted"] >= 3], "dribble_success_rate")
+    return out
+
+
+SORT_KEYS = {"rating": "rating", "goals": "goals", "key_passes": "key_passes", "shots": "shots_total"}
+
+
+def sort_players(rows, sort="rating"):
+    key = SORT_KEYS[sort]
+    return sorted(rows, key=lambda r: (r[key] is None, -(r[key] or 0), r["name"] or ""))

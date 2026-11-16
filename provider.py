@@ -61,6 +61,9 @@ class ApiFootball:
     def events(self, fid):
         return self._get("/fixtures/events", {"fixture": fid})
 
+    def players(self, fid):
+        return self._get("/fixtures/players", {"fixture": fid})
+
 
 class MockProvider:
     name = "mock"
@@ -80,6 +83,9 @@ class MockProvider:
 
     def events(self, fid):
         return self._d.EVENTS.get(fid, [])
+
+    def players(self, fid):
+        return self._d.PLAYERS.get(fid, [])
 
 
 def get_provider():

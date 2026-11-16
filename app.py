@@ -1,7 +1,7 @@
 """Football analysis microservice. JSON only, no UI. See README.md for the API contract."""
 import os
 from flask import Flask, jsonify, request
-from analysis import analyze_match, normalize_event
+from analysis import SORT_KEYS, analyze_match, leaders, normalize_event, player_rows, sort_players
 from provider import ProviderError, get_provider
 
 try:
@@ -15,6 +15,16 @@ VALID_EVENT_TYPES = {"goal", "card", "substitution", "var", "other"}
 
 def error(code, message, status):
     return jsonify(error={"code": code, "message": message}), status
+
+
+def player_id_arg():
+    """Returns (player_id or None, error response or None)."""
+    raw = request.args.get("player_id")
+    if raw is None:
+        return None, None
+    if not raw.isdigit():
+        return None, error("bad_parameter", "player_id must be a whole number.", 400)
+    return int(raw), None
 
 
 def create_app(provider=None):
@@ -67,12 +77,38 @@ def create_app(provider=None):
         kind = (request.args.get("type") or "").lower()
         if kind and kind not in VALID_EVENT_TYPES:
             return error("bad_parameter", f"type must be one of: {', '.join(sorted(VALID_EVENT_TYPES))}.", 400)
+        pid, err = player_id_arg()
+        if err:
+            return err
         if not prov.fixture(match_id):
             return error("match_not_found", f"No match with id {match_id}.", 404)
         evs = sorted((normalize_event(e) for e in prov.events(match_id)), key=lambda e: (e["minute"], e["extra"]))
         team = (request.args.get("team") or "").strip().lower()
-        evs = [e for e in evs if (not kind or e["type"] == kind) and (not team or (e["team"] or "").lower() == team)]
+        evs = [e for e in evs if (not kind or e["type"] == kind) and (not team or (e["team"] or "").lower() == team)
+               and (pid is None or e["player_id"] == pid)]
         return jsonify(match_id=match_id, count=len(evs), events=evs)
+
+    @app.get("/v1/matches/<int:match_id>/players")
+    def players(match_id):
+        sort = (request.args.get("sort") or "rating").lower()
+        if sort not in SORT_KEYS:
+            return error("bad_parameter", f"sort must be one of: {', '.join(sorted(SORT_KEYS))}.", 400)
+        raw = request.args.get("limit", "10")
+        if not raw.isdigit() or not 1 <= int(raw) <= 50:
+            return error("bad_parameter", "limit must be a whole number from 1 to 50.", 400)
+        pid, err = player_id_arg()
+        if err:
+            return err
+        if not prov.fixture(match_id):
+            return error("match_not_found", f"No match with id {match_id}.", 404)
+        rows = player_rows(prov.players(match_id))
+        if pid is not None:
+            rows = [r for r in rows if r["player_id"] == pid]
+        team = (request.args.get("team") or "").strip().lower()
+        if team:
+            rows = [r for r in rows if (r["team"] or "").lower() == team]
+        return jsonify(match_id=match_id, count=len(rows), sorted_by=sort, leaders=leaders(rows),
+                       players=sort_players(rows, sort)[:int(raw)])
 
     return app
 

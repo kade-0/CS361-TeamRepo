@@ -34,9 +34,13 @@ STATISTICS = {
     ],
 }
 
+PLAYER_IDS = {"M. Duarte": 101, "S. Halvorsen": 102, "L. Brandt": 103, "A. Weiss": 104, "T. Ivanov": 105,
+              "B. Reserve": 106, "R. Vance": 201, "K. Osei": 202, "D. Mills": 203, "P. Njoku": 204, "A. Ruiz": 301}
+
+
 def _ev(el, extra, team, tid, player, typ, detail, assist=None):
     return {"time": {"elapsed": el, "extra": extra}, "team": {"id": tid, "name": team},
-            "player": {"id": None, "name": player}, "assist": {"id": None, "name": assist},
+            "player": {"id": PLAYER_IDS.get(player), "name": player}, "assist": {"id": PLAYER_IDS.get(assist), "name": assist},
             "type": typ, "detail": detail, "comments": None}
 
 EVENTS = {
@@ -49,4 +53,32 @@ EVENTS = {
         _ev(64, None, "Coventry City", 1500, "D. Mills", "Card", "Red Card"),
     ],
     1002: [_ev(22, None, "Seattle", 1601, "A. Ruiz", "Card", "Yellow Card")],
+}
+
+
+def _pl(tid, tname, rows):
+    out = []
+    for (name, pos, mins, rating, goals, assists, shots, on, key, ptotal, duels, won, drib, dsucc, tack, inter, fc, fd, yc, rc) in rows:
+        out.append({"player": {"id": PLAYER_IDS.get(name), "name": name}, "statistics": [{
+            "games": {"minutes": mins, "position": pos, "rating": rating},
+            "shots": {"total": shots, "on": on}, "goals": {"total": goals, "assists": assists},
+            "passes": {"total": ptotal, "key": key}, "duels": {"total": duels, "won": won},
+            "dribbles": {"attempts": drib, "success": dsucc}, "tackles": {"total": tack, "interceptions": inter},
+            "fouls": {"committed": fc, "drawn": fd}, "cards": {"yellow": yc, "red": rc}}]})
+    return {"team": {"id": tid, "name": tname}, "players": out}
+
+# name, pos, min, rating, goals, assists, shots, on, key passes, passes, duels, won, dribbles, success, tackles, interceptions, fouls, drawn, yellow, red
+PLAYERS = {
+    1001: [
+        _pl(47, "Tottenham", [("M. Duarte", "F", 67, "8.1", 1, 0, 4, 3, 2, 31, 14, 9, 6, 4, 1, 0, 1, 3, 0, 0),
+                              ("S. Halvorsen", "M", 67, "7.6", 1, 0, 3, 2, 3, 48, 12, 7, 2, 1, 2, 1, 2, 2, 0, 0),
+                              ("L. Brandt", "M", 60, "7.2", 0, 1, 1, 1, 4, 55, 9, 5, 3, 2, 1, 2, 0, 1, 0, 0),
+                              ("A. Weiss", "D", 67, "6.9", 0, 0, 0, 0, 0, 62, 10, 7, 0, 0, 4, 3, 2, 0, 1, 0),
+                              ("T. Ivanov", "M", 7, None, 0, 0, 0, 0, 0, 5, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+                              ("B. Reserve", "G", None, None, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)]),
+        _pl(1500, "Coventry City", [("R. Vance", "F", 67, "7.4", 1, 0, 3, 2, 1, 22, 15, 7, 4, 2, 0, 0, 2, 2, 0, 0),
+                                    ("K. Osei", "M", 67, "6.8", 0, 1, 1, 1, 2, 40, 13, 6, 1, 0, 3, 1, 3, 1, 1, 0),
+                                    ("D. Mills", "D", 64, "5.4", 0, 0, 0, 0, 0, 33, 9, 3, 0, 0, 2, 1, 4, 0, 1, 1),
+                                    ("P. Njoku", "G", 67, "7.0", 0, 0, 0, 0, 0, 24, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0)]),
+    ],
 }
