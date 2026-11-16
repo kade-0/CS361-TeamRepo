@@ -20,8 +20,10 @@ function rateLimit({ windowMs, max, key = req => req.ip }) {
     entry.count++;
     if (entry.count <= max) return next();
     log(req, "rate_limited", { path: req.path, count: entry.count });
-    res.set("Retry-After", Math.ceil((entry.resetAt - now) / 1000));
-    res.status(429).json({ error: "Too many requests. Wait a minute and try again." });
+    const seconds = Math.ceil((entry.resetAt - now) / 1000);
+    const minutes = Math.ceil(seconds / 60);
+    res.set("Retry-After", seconds);
+    res.status(429).json({ error: `Too many requests. Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.` });
   };
 }
 

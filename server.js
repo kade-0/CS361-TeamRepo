@@ -4,6 +4,7 @@ const https = require("https");
 const store = require("./db");
 const { rateLimit } = require("./ratelimit");
 const { log, maskEmail, requestLogger } = require("./logger");
+const emailWorker = require("./emailworker");
 
 const PORT = process.env.PORT || 4000;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -12,6 +13,16 @@ const MIN_PASSWORD_LENGTH = 12;
 const MAX_PASSWORD_LENGTH = 256;
 const DISPLAY_NAME_MAX = 40;
 const REGISTERED_MESSAGE = "Thanks! Check your email for a link to verify your account.";
+const RESEND_MESSAGE = "If that email belongs to an account that still needs verifying, we've sent it a new link.";
+const NOT_VERIFIED = { error: "Please verify your email before logging in. Check your inbox for the link, or request a new one.", code: "email_not_verified" };
+
+// what the verify endpoint says for each way a token can be rejected
+const TOKEN_ERRORS = {
+  invalid: { error: "This verification link is not valid. Request a new one below.", code: "token_invalid" },
+  superseded: { error: "This verification link was replaced by a newer one. Use the newest email, or request a new link below.", code: "token_invalid" },
+  used: { error: "This verification link has already been used. If your email is verified, you can log in.", code: "token_used" },
+  expired: { error: "This verification link has expired. Request a new one below.", code: "token_expired" }
+};
 
 // account response shape function
 
@@ -27,6 +38,10 @@ function requireAuth(req, res, next) {
   if (!account) {
     log(req, "auth.rejected", { reason: token ? "invalid_token" : "missing_token" });
     return res.status(401).json({ error: "Missing or invalid access token." });
+  }
+  if (account.status !== "active") {
+    log(req, "auth.rejected", { reason: "email_not_verified", account: account.id });
+    return res.status(403).json(NOT_VERIFIED);
   }
   req.account = account;
   req.token = token;
@@ -73,7 +88,47 @@ async function handleRegister(req, res) {
   const result = await store.registerAccount(req.body.email.trim(), req.body.password, req.body.displayName.trim());
   log(req, result.created ? "account.created" : "register.email_taken", { account: result.accountId, email: maskEmail(req.body.email) });
   log(req, "email.queued", { template: result.template, account: result.accountId });
+  emailWorker.kick();
   res.status(202).json({ message: REGISTERED_MESSAGE });
+}
+
+// email verification handler functions; outcomes are logged for auditing, tokens never are
+
+function handleVerifyEmail(req, res) {
+  const token = req.body && req.body.token;
+  if (typeof token !== "string" || !token) {
+    log(req, "verify.rejected", { outcome: "missing_token" });
+    return res.status(400).json(TOKEN_ERRORS.invalid);
+  }
+  const result = store.verifyEmailToken(token);
+  if (result.outcome !== "verified") {
+    log(req, "verify.rejected", { outcome: result.outcome, account: result.accountId || "-" });
+    return res.status(400).json(TOKEN_ERRORS[result.outcome]);
+  }
+  log(req, "verify.succeeded", { account: result.accountId });
+  res.json({ message: "Your email is verified. You can now log in.", status: "active" });
+}
+
+// the response is identical whether the email is unknown, pending or already verified
+
+function handleResendVerification(req, res) {
+  const email = req.body && req.body.email;
+  const error = validateEmail(email);
+  if (error) return res.status(400).json({ error: "Please fix the highlighted fields.", fields: { email: error } });
+  const result = store.requestVerificationResend(email.trim());
+  log(req, "verify.resend", { outcome: result.outcome, account: result.accountId || "-", email: maskEmail(email) });
+  if (result.outcome === "queued") {
+    log(req, "email.queued", { template: "verify_email", account: result.accountId });
+    emailWorker.kick();
+  }
+  res.status(202).json({ message: RESEND_MESSAGE });
+}
+
+// limits resends per account (by email address) rather than per IP
+
+function resendKey(req) {
+  const email = req.body && req.body.email;
+  return typeof email === "string" ? email.trim().toLowerCase() : req.ip;
 }
 
 // login and logout handler functions
@@ -84,6 +139,11 @@ async function handleLogin(req, res) {
   if (!account || typeof password !== "string" || !(await store.verifyPassword(password, account.password_hash))) {
     log(req, "login.failed", { email: maskEmail(email), reason: account ? "wrong_password" : "unknown_email" });
     return res.status(401).json({ error: "Incorrect email or password." });
+  }
+  // only checked after the password, so account status is never revealed to someone without it
+  if (account.status !== "active") {
+    log(req, "login.denied", { account: account.id, reason: "email_not_verified" });
+    return res.status(403).json(NOT_VERIFIED);
   }
   const { token, expiresAt } = store.issueAccessToken(account.id);
   log(req, "login.success", { account: account.id });
@@ -122,8 +182,8 @@ function setupRoutes(app) {
   app.use(requestLogger);
   app.use(express.json({ limit: "10kb" }));
   app.post("/v1/accounts", rateLimit({ windowMs: 60 * 1000, max: 5 }), wrap(handleRegister));
-  app.post("/v1/accounts/verify-email", notImplemented);
-  app.post("/v1/accounts/verify-email/resend", notImplemented);
+  app.post("/v1/accounts/verify-email", handleVerifyEmail);
+  app.post("/v1/accounts/verify-email/resend", rateLimit({ windowMs: 60 * 60 * 1000, max: 3, key: resendKey }), handleResendVerification);
   app.get("/v1/accounts/me", requireAuth, handleMe);
   app.patch("/v1/accounts/me", requireAuth, notImplemented);
   app.delete("/v1/accounts/me", requireAuth, notImplemented);
@@ -148,6 +208,7 @@ function startServer() {
   const app = express();
   setupRoutes(app);
   setInterval(store.clearExpiredTokens, 15 * 60 * 1000).unref();
+  emailWorker.start();
   listen(app);
 }
 

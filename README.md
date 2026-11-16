@@ -8,7 +8,25 @@ Display Name 1-40 characters (trimmed whitespace)
 
 New accounts start as `pending_verification`.
 
-Registration (`POST /v1/accounts`) returns the same `202` message whether or not the email is already taken. Invalid input returns `400` with an error for each field. It is limited to 5 requests per IP per minute (`429` after that).
+# Email Verification
+
+New accounts must verify their email before they can log in. Logging in before that returns `403` with `code: "email_not_verified"`.
+
+Verification links expire after 24 hours and work once.
+
+`POST /v1/accounts/verify-email` returns `200` on success, or `400` with one of these codes:
+
+- `token_invalid`: unknown link, or replaced by a newer one
+- `token_used`: already used
+- `token_expired`: older than 24 hours
+
+The link points to `VERIFY_URL` (default `http://localhost:3000/verify-email`).
+
+# Email
+
+Without SMTP settings, emails are written to `mail/` as JSON files instead (ignored by git). Set `MAIL_DIR` to change the folder.
+
+To send real email, set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` and `MAIL_FROM`. Set `SMTP_SECURE=true` for port 465.
 
 # TLS
 
