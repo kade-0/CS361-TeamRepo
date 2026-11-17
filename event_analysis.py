@@ -4,6 +4,11 @@ claim to know why a player acted."""
 from analysis import chronological
 
 MAJOR = ("goal", "card", "var")
+DECIDED_MARGIN = 4          # goal margin at which the analysis points out the gap is large
+
+
+def _key(pid, name):
+    return pid if pid is not None else name
 
 
 def ordinal(n):
@@ -102,6 +107,7 @@ def build_timeline(fx, raw_events):
     scorer_at = {e["index"]: _credit(e, _side(e, fx), mode) for e in evs if _side(e, fx) and _is_scoring(e)}
     score = {"home": 0, "away": 0}
     reds, yellows, player_cards = {"home": 0, "away": 0}, {"home": 0, "away": 0}, {}
+    player_goals, player_assists, team_goals = {}, {}, {"home": 0, "away": 0}
     last_goal_min, lead = None, (None, 0)          # lead = (side currently ahead, minute that began)
     for e in evs:
         side, before = _side(e, fx), dict(score)
@@ -135,6 +141,23 @@ def build_timeline(fx, raw_events):
             if e["phase"] == "start of second half": insights.append("Scored shortly after half-time.")
             if e["phase"] in ("closing stages", "second-half stoppage time") and sig in ("equalizer", "go-ahead goal"):
                 insights.append("A late goal that changes who is ahead.")
+            team_goals[s] += 1
+            e["team_goals_in_match"] = team_goals[s]
+            if team_goals[s] >= 3: insights.append(f"{T}'s {ordinal(team_goals[s])} goal of the match.")
+            if not _is_own_goal(e):
+                k = _key(e["player_id"], e["player"])
+                player_goals[k] = n = player_goals.get(k, 0) + 1
+                e["player_goals_in_match"] = n
+                if n == 2: insights.append(f"Second goal of the match for {e['player']} (a brace).")
+                elif n == 3: insights.append(f"Third goal of the match for {e['player']}, completing a hat-trick.")
+                elif n > 3: insights.append(f"{ordinal(n)} goal of the match for {e['player']}.")
+                if e["assist"]:
+                    ka = _key(e["assist_id"], e["assist"])
+                    player_assists[ka] = m = player_assists.get(ka, 0) + 1
+                    e["assist_count_in_match"] = m
+                    if m >= 2: insights.append(f"{e['assist']}'s {ordinal(m)} assist of the match.")
+            e["margin_after"] = abs(score["home"] - score["away"])
+            if e["margin_after"] >= DECIDED_MARGIN: insights.append(f"The margin is now {e['margin_after']} goals.")
             last_goal_min = e["minute"]
             leader = "home" if score["home"] > score["away"] else "away" if score["away"] > score["home"] else None
             if leader != lead[0]: lead = (leader, e["minute"])
