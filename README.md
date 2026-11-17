@@ -11,3 +11,5 @@ Sam - Worked on `analysis` and `reports`
 Garrett - Worked on `reports` and `banking`
 
 Deon - Worked on `banking`
+
+<img width="1075" height="591" alt="image" src="https://github.com/user-attachments/assets/a0e4d3ac-e71d-424f-8d2e-9450ce30c302" />
