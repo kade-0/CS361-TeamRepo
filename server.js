@@ -24,6 +24,18 @@ const TOKEN_ERRORS = {
   expired: { error: "This verification link has expired. Request a new one below.", code: "token_expired" }
 };
 
+const RESET_REQUESTED_MESSAGE = "If that email belongs to an account, we've sent it a link to reset your password. The link expires in 30 minutes.";
+const PASSWORD_CHANGED_MESSAGE = "Your password has been changed and you've been logged out everywhere. Log in with your new password.";
+const RECENT_PASSWORD = { error: "You've used that password recently. Choose a password that isn't one of your last 5.", code: "password_recently_used" };
+
+// what the password reset endpoints say for each way a reset link can be rejected
+const RESET_TOKEN_ERRORS = {
+  invalid: { error: "This password reset link is not valid. Request a new one below.", code: "token_invalid" },
+  superseded: { error: "This password reset link was replaced by a newer one. Use the newest email, or request a new link below.", code: "token_invalid" },
+  used: { error: "This password reset link has already been used. Request a new one below if you still need to reset your password.", code: "token_used" },
+  expired: { error: "This password reset link has expired. Links only work for 30 minutes. Request a new one below.", code: "token_expired" }
+};
+
 // account response shape function
 
 function accountView(account) {
@@ -124,9 +136,9 @@ function handleResendVerification(req, res) {
   res.status(202).json({ message: RESEND_MESSAGE });
 }
 
-// limits resends per account (by email address) rather than per IP
+// rate limit key for limiting per account (by email address) rather than per IP
 
-function resendKey(req) {
+function emailKey(req) {
   const email = req.body && req.body.email;
   return typeof email === "string" ? email.trim().toLowerCase() : req.ip;
 }
@@ -156,6 +168,72 @@ function handleLogout(req, res) {
   res.status(204).end();
 }
 
+// password reset handler functions; outcomes are logged for auditing, tokens and passwords never are
+
+function handlePasswordResetRequest(req, res) {
+  const email = req.body && req.body.email;
+  const error = validateEmail(email);
+  if (error) return res.status(400).json({ error: "Please fix the highlighted fields.", fields: { email: error } });
+  // respond before looking the email up, so known and unknown emails take the same time to answer
+  res.status(202).json({ message: RESET_REQUESTED_MESSAGE });
+  setImmediate(() => queuePasswordReset(req, email.trim()));
+}
+
+function queuePasswordReset(req, email) {
+  try {
+    const result = store.requestPasswordReset(email);
+    log(req, "password_reset.requested", { outcome: result.outcome, account: result.accountId || "-", email: maskEmail(email) });
+    if (result.outcome === "queued") {
+      log(req, "email.queued", { template: "password_reset", account: result.accountId });
+      emailWorker.kick();
+    }
+  } catch (err) {
+    logError(req, err);
+  }
+}
+
+function findResetToken(req) {
+  const token = req.body && req.body.token;
+  if (typeof token !== "string" || !token) return { outcome: "invalid" };
+  return store.checkPasswordResetToken(token);
+}
+
+function rejectResetToken(req, res, result) {
+  log(req, "password_reset.rejected", { outcome: result.outcome, account: result.accountId || "-" });
+  res.status(400).json(RESET_TOKEN_ERRORS[result.outcome]);
+}
+
+// lets the reset page check its link as soon as it opens, before the user types a new password
+
+function handlePasswordResetCheck(req, res) {
+  const result = findResetToken(req);
+  if (result.outcome !== "valid") return rejectResetToken(req, res, result);
+  res.json({ message: "This link is valid. Choose a new password." });
+}
+
+async function handlePasswordResetConfirm(req, res) {
+  const tokenCheck = findResetToken(req);
+  if (tokenCheck.outcome !== "valid") return rejectResetToken(req, res, tokenCheck);
+
+  const { token, newPassword } = req.body;
+  const policyError = validatePassword(newPassword);
+  if (policyError) {
+    log(req, "password_reset.rejected", { outcome: "password_policy", account: tokenCheck.accountId });
+    return res.status(400).json({ error: "Please fix the highlighted fields.", fields: { newPassword: policyError } });
+  }
+  if (await store.isRecentPassword(tokenCheck.accountId, newPassword)) {
+    log(req, "password_reset.rejected", { outcome: "password_recently_used", account: tokenCheck.accountId });
+    return res.status(400).json({ ...RECENT_PASSWORD, fields: { newPassword: RECENT_PASSWORD.error } });
+  }
+
+  const result = await store.resetPassword(token, newPassword);
+  if (result.outcome !== "reset") return rejectResetToken(req, res, result);
+  log(req, "password_reset.completed", { account: result.accountId, sessions_revoked: result.sessionsRevoked });
+  log(req, "email.queued", { template: "password_changed", account: result.accountId });
+  emailWorker.kick();
+  res.json({ message: PASSWORD_CHANGED_MESSAGE });
+}
+
 // current account handler function
 
 function handleMe(req, res) {
@@ -169,6 +247,13 @@ function wrap(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 }
 
+// log only the error itself, never the request body (it may hold a password)
+
+function logError(req, err) {
+  log(req, "error", { path: req.path, message: JSON.stringify(err.message) });
+  console.error(err.stack || err.message);
+}
+
 // placeholder for endpoints that are part of the API but they aren't in quite yet
 
 function notImplemented(req, res) {
@@ -179,27 +264,32 @@ function setupRoutes(app) {
   // for rate limiting to work correctly behind a reverse proxy, we need to trust the proxy (e.g. Cloudflare).
   app.set("trust proxy", process.env.TRUST_PROXY || "loopback");
   
+  // one limit shared by checking and using reset links
+  const resetLinkLimit = rateLimit({ windowMs: 15 * 60 * 1000, max: 20 });
+
   app.use(requestLogger);
   app.use(express.json({ limit: "10kb" }));
   app.post("/v1/accounts", rateLimit({ windowMs: 60 * 1000, max: 5 }), wrap(handleRegister));
   app.post("/v1/accounts/verify-email", handleVerifyEmail);
-  app.post("/v1/accounts/verify-email/resend", rateLimit({ windowMs: 60 * 60 * 1000, max: 3, key: resendKey }), handleResendVerification);
+  app.post("/v1/accounts/verify-email/resend", rateLimit({ windowMs: 60 * 60 * 1000, max: 3, key: emailKey }), handleResendVerification);
   app.get("/v1/accounts/me", requireAuth, handleMe);
   app.patch("/v1/accounts/me", requireAuth, notImplemented);
   app.delete("/v1/accounts/me", requireAuth, notImplemented);
   app.post("/v1/auth/login", wrap(handleLogin));
   app.post("/v1/auth/logout", requireAuth, handleLogout);
-  app.post("/v1/auth/password-reset/request", notImplemented);
-  app.post("/v1/auth/password-reset/confirm", notImplemented);
+  app.post("/v1/auth/password-reset/request",
+    rateLimit({ windowMs: 15 * 60 * 1000, max: 10 }),
+    rateLimit({ windowMs: 60 * 60 * 1000, max: 3, key: emailKey }),
+    handlePasswordResetRequest);
+  app.post("/v1/auth/password-reset/check", resetLinkLimit, handlePasswordResetCheck);
+  app.post("/v1/auth/password-reset/confirm", resetLinkLimit, wrap(handlePasswordResetConfirm));
   app.use((req, res) => res.status(404).json({ error: "Not found." }));
   app.use((err, req, res, next) => {
     if (err.type === "entity.parse.failed") {
       log(req, "request.bad_json", { path: req.path });
       return res.status(400).json({ error: "Request body must be valid JSON." });
     }
-    // log only the error itself, never the request body (it may hold a password)
-    log(req, "error", { path: req.path, message: JSON.stringify(err.message) });
-    console.error(err.stack || err.message);
+    logError(req, err);
     res.status(500).json({ error: "Something went wrong. Try again." });
   });
 }

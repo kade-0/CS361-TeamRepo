@@ -74,6 +74,31 @@ Verification links expire after 24 hours and work once.
 
 The link points to `VERIFY_URL` (default `http://localhost:3000/verify-email`).
 
+# Password Reset
+
+The flow takes 3 steps: enter your email, open the emailed link, choose a new password.
+
+1. `POST /v1/auth/password-reset/request` always returns `202` with the same message, whether or not the email has an account.
+2. The link points to `RESET_URL#token=...` (default `http://localhost:3000/reset-password`).
+3. `POST /v1/auth/password-reset/confirm` sets the new password. It returns `200` on success. Then:
+   - the link and any other open reset links for the account stop working
+   - every access token for the account is revoked, which logs it out everywhere
+   - a "password changed" email is sent
+
+Links expire after 30 minutes and work once. Requesting a new link replaces the old one. Tokens are stored as SHA-256 hashes.
+
+`check` and `confirm` return `400` with one of these codes when the link can't be used, with a message that offers a new link:
+
+- `token_invalid`: unknown or altered link, or replaced by a newer one
+- `token_used`: already used
+- `token_expired`: older than 30 minutes
+
+`confirm` also returns `400` when the new password fails the password policy, or with `code: "password_recently_used"` when it matches the current password or one of the 4 before it.
+
+Rate limits: `request` allows 10 per IP per 15 minutes and 3 per email address per hour. `check` and `confirm` together allow 20 per IP per 15 minutes.
+
+Every request, rejection and completion is logged with the account id and a masked email. Tokens and passwords are never logged.
+
 # Email
 
 Without SMTP settings, emails are written to `mail/` as JSON files instead (ignored by git). Set `MAIL_DIR` to change the folder.
@@ -100,8 +125,9 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj "/CN=localhost" -keyou
 Setting the env (.pem is ignored by git):
 
 ```
-TLS_KEY_PATH=key.pem 
-TLS_CERT_PATH=cert.pem npm start
+TLS_KEY_PATH=key.pem
+TLS_CERT_PATH=cert.pem
+npm start
 ```
 
 Point it at node:
@@ -121,6 +147,8 @@ npm start
 /v1/accounts/verify-email/resend, POST, Body: email 
 
 /v1/auth/password-reset/request, POST, Body: email 
+
+/v1/auth/password-reset/check, POST, Body: token 
 
 /v1/auth/password-reset/confirm, POST, Body: token, newPassword 
 
