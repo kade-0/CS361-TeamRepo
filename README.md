@@ -8,6 +8,6 @@ Kade - Organizing and management of the repository and project, worked on `accou
 
 Sam - Worked on `analysis` and `reports`
 
-Garrett - Worked on `reports and `banking`
+Garrett - Worked on `reports` and `banking`
 
 Deon - Worked on `banking`
