@@ -1,7 +1,8 @@
 """Football analysis microservice. JSON only, no UI. See README.md for the API contract."""
 import os
 from flask import Flask, jsonify, request
-from analysis import SORT_KEYS, analyze_match, leaders, normalize_event, player_rows, sort_players
+from analysis import SORT_KEYS, analyze_match, chronological, leaders, player_rows, sort_players
+from event_analysis import MAJOR, build_timeline
 from provider import ProviderError, get_provider
 
 try:
@@ -82,11 +83,34 @@ def create_app(provider=None):
             return err
         if not prov.fixture(match_id):
             return error("match_not_found", f"No match with id {match_id}.", 404)
-        evs = sorted((normalize_event(e) for e in prov.events(match_id)), key=lambda e: (e["minute"], e["extra"]))
+        evs = chronological(prov.events(match_id))
         team = (request.args.get("team") or "").strip().lower()
         evs = [e for e in evs if (not kind or e["type"] == kind) and (not team or (e["team"] or "").lower() == team)
                and (pid is None or e["player_id"] == pid)]
         return jsonify(match_id=match_id, count=len(evs), events=evs)
+
+    @app.get("/v1/matches/<int:match_id>/events/analysis")
+    def events_analysis(match_id):
+        kind = (request.args.get("type") or "").lower()
+        if kind and kind not in VALID_EVENT_TYPES:
+            return error("bad_parameter", f"type must be one of: {', '.join(sorted(VALID_EVENT_TYPES))}.", 400)
+        fixture = prov.fixture(match_id)
+        if not fixture:
+            return error("match_not_found", f"No match with id {match_id}.", 404)
+        team = (request.args.get("team") or "").strip().lower()
+        items = [e for e in build_timeline(fixture, prov.events(match_id))
+                 if e["type"] in ({kind} if kind else set(MAJOR)) and (not team or (e["team"] or "").lower() == team)]
+        return jsonify(match_id=match_id, count=len(items), events=items)
+
+    @app.get("/v1/matches/<int:match_id>/events/<int:index>/analysis")
+    def event_analysis(match_id, index):
+        fixture = prov.fixture(match_id)
+        if not fixture:
+            return error("match_not_found", f"No match with id {match_id}.", 404)
+        timeline = build_timeline(fixture, prov.events(match_id))
+        if index >= len(timeline):
+            return error("event_not_found", f"Match {match_id} has no event with index {index}.", 404)
+        return jsonify(match_id=match_id, event=timeline[index])
 
     @app.get("/v1/matches/<int:match_id>/players")
     def players(match_id):

@@ -9,6 +9,7 @@ def _fx(fid, league, lid, status, long_, elapsed, home, hid, away, aid, hg, ag):
 FIXTURES = {
     1001: _fx(1001, "Premier League", 39, "2H", "Second Half", 67, "Tottenham", 47, "Coventry City", 1500, 2, 1),
     1002: _fx(1002, "Major League Soccer", 253, "1H", "First Half", 38, "Portland", 1600, "Seattle", 1601, 0, 0),
+    1004: _fx(1004, "Premier League", 39, "FT", "Match Finished", 90, "Harbor FC", 700, "Ridgeline SC", 701, 2, 2),
     1003: _fx(1003, "Serie A", 135, "FT", "Match Finished", 90, "Inter Milan", 505, "A.C. Milan", 489, 2, 0),
 }
 
@@ -35,7 +36,7 @@ STATISTICS = {
 }
 
 PLAYER_IDS = {"M. Duarte": 101, "S. Halvorsen": 102, "L. Brandt": 103, "A. Weiss": 104, "T. Ivanov": 105,
-              "B. Reserve": 106, "R. Vance": 201, "K. Osei": 202, "D. Mills": 203, "P. Njoku": 204, "A. Ruiz": 301}
+              "B. Reserve": 106, "J. Marsh": 401, "C. Dunn": 402, "T. Boyd": 403, "N. Park": 404, "R. Aziz": 405, "Z. Okoro": 406, "R. Vance": 201, "K. Osei": 202, "D. Mills": 203, "P. Njoku": 204, "A. Ruiz": 301}
 
 
 def _ev(el, extra, team, tid, player, typ, detail, assist=None):
@@ -82,3 +83,16 @@ PLAYERS = {
                                     ("P. Njoku", "G", 67, "7.0", 0, 0, 0, 0, 0, 24, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0)]),
     ],
 }
+
+
+# Edge-case match: opening goal, missed penalty, own goal, second yellow, VAR, penalty, stoppage-time equalizer
+EVENTS[1004] = [
+    _ev(10, None, "Harbor FC", 700, "J. Marsh", "Goal", "Normal Goal"),
+    _ev(25, None, "Ridgeline SC", 701, "C. Dunn", "Goal", "Missed Penalty"),
+    _ev(38, None, "Harbor FC", 700, "T. Boyd", "Goal", "Own Goal"),
+    _ev(44, None, "Ridgeline SC", 701, "N. Park", "Card", "Yellow Card"),
+    _ev(52, None, "Ridgeline SC", 701, "N. Park", "Card", "Second Yellow card"),
+    _ev(60, None, "Ridgeline SC", 701, "R. Aziz", "Var", "Goal Disallowed - offside"),
+    _ev(71, None, "Harbor FC", 700, "J. Marsh", "Goal", "Penalty"),
+    _ev(90, 3, "Ridgeline SC", 701, "R. Aziz", "Goal", "Normal Goal", "Z. Okoro"),
+]

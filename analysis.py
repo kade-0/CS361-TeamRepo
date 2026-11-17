@@ -70,6 +70,14 @@ def normalize_event(e):
             "detail": e.get("detail"), "comments": e.get("comments")}
 
 
+def chronological(raw_events):
+    """Normalized events in match order, each with a stable 0-based `index`."""
+    evs = sorted((normalize_event(e) for e in raw_events), key=lambda e: (e["minute"], e["extra"]))
+    for i, e in enumerate(evs):
+        e["index"] = i
+    return evs
+
+
 def is_key_moment(ev):
     d = (ev["detail"] or "").lower()
     return ev["type"] in ("goal", "var") or (ev["type"] == "card" and ("red" in d or "second yellow" in d))
@@ -103,7 +111,7 @@ def analyze_match(fixture, stat_blocks, events):
     ok = bool(hb and ab)
     home, away = (team_stats(hb), team_stats(ab)) if ok else (None, None)
     dom = dominance(home, away) if ok else None
-    evs = sorted((normalize_event(e) for e in events), key=lambda e: (e["minute"], e["extra"]))
+    evs = chronological(events)
     return {"match": match, "statistics_available": ok, "teams": {"home": home, "away": away} if ok else None,
             "dominance": dom, "key_moments": [e for e in evs if is_key_moment(e)],
             "summary": _summary(match, ok, dom, home, away)}
