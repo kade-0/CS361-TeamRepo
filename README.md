@@ -1,3 +1,7 @@
+# Accounts Microservice
+
+This microservice handles a database for account registration, and management.
+
 # Requirements
 
 Email must be `name@domain.tld`, at most 254 characters. Must be unique.
