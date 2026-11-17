@@ -6,6 +6,8 @@ const crypto = require("crypto");
 const DB_PATH = process.env.ACCOUNTS_DB_PATH || path.join(__dirname, "accounts.db");
 const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const VERIFY_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+const RESET_TOKEN_TTL_MS = 30 * 60 * 1000;
+const RECENT_PASSWORD_COUNT = 5;
 
 const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
@@ -57,6 +59,26 @@ function initSchema() {
     )
   `);
   db.exec("CREATE INDEX IF NOT EXISTS verification_tokens_account ON verification_tokens (account_id)");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      token_hash TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
+      invalidated_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  db.exec("CREATE INDEX IF NOT EXISTS password_reset_tokens_account ON password_reset_tokens (account_id)");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS password_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      password_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  db.exec("CREATE INDEX IF NOT EXISTS password_history_account ON password_history (account_id)");
 }
 function addColumnIfMissing(table, column, type) {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all();
@@ -83,6 +105,14 @@ function sha256(value) {
 
 function now() {
   return new Date().toISOString();
+}
+
+function tokenStatus(row) {
+  if (!row) return "invalid";
+  if (row.used_at) return "used";
+  if (row.invalidated_at) return "superseded";
+  if (row.expires_at <= now()) return "expired";
+  return "valid";
 }
 
 // account query functions
@@ -132,11 +162,8 @@ const createVerificationToken = db.transaction(accountId => {
 
 const verifyEmailToken = db.transaction(token => {
   const row = db.prepare("SELECT * FROM verification_tokens WHERE token_hash = ?").get(sha256(token));
-  if (!row) return { outcome: "invalid" };
-  const result = { accountId: row.account_id };
-  if (row.used_at) return { ...result, outcome: "used" };
-  if (row.invalidated_at) return { ...result, outcome: "superseded" };
-  if (row.expires_at <= now()) return { ...result, outcome: "expired" };
+  const result = { outcome: tokenStatus(row), accountId: row && row.account_id };
+  if (result.outcome !== "valid") return result;
   db.prepare("UPDATE verification_tokens SET used_at = ? WHERE token_hash = ?").run(now(), row.token_hash);
   db.prepare("UPDATE accounts SET status = 'active', updated_at = datetime('now') WHERE id = ? AND status = 'pending_verification'").run(row.account_id);
   return { ...result, outcome: "verified" };
@@ -150,6 +177,74 @@ const requestVerificationResend = db.transaction(email => {
   queueEmail(account.id, "verify_email");
   return { outcome: "queued", accountId: account.id };
 });
+
+// password reset functions; like verification tokens, reset tokens are stored only as hashes
+
+function requestPasswordReset(email) {
+  const account = findAccountByEmail(email);
+  if (!account) return { outcome: "no_account" };
+  if (account.status !== "active") return { outcome: "not_active", accountId: account.id };
+  queueEmail(account.id, "password_reset");
+  return { outcome: "queued", accountId: account.id };
+}
+
+function invalidatePasswordResetTokens(accountId) {
+  db.prepare("UPDATE password_reset_tokens SET invalidated_at = ? WHERE account_id = ? AND used_at IS NULL AND invalidated_at IS NULL").run(now(), accountId);
+}
+
+const createPasswordResetToken = db.transaction(accountId => {
+  invalidatePasswordResetTokens(accountId);
+  const token = crypto.randomBytes(32).toString("base64url");
+  const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS).toISOString();
+  db.prepare("INSERT INTO password_reset_tokens (token_hash, account_id, expires_at) VALUES (?, ?, ?)").run(sha256(token), accountId, expiresAt);
+  return token;
+});
+
+function checkPasswordResetToken(token) {
+  const row = db.prepare("SELECT * FROM password_reset_tokens WHERE token_hash = ?").get(sha256(token));
+  return { outcome: tokenStatus(row), accountId: row && row.account_id };
+}
+
+// the current password hash followed by the previous ones, newest first
+
+function recentPasswordHashes(accountId) {
+  const previous = db.prepare("SELECT password_hash FROM password_history WHERE account_id = ? ORDER BY id DESC LIMIT ?").all(accountId, RECENT_PASSWORD_COUNT - 1);
+  return [findAccountById(accountId).password_hash, ...previous.map(row => row.password_hash)];
+}
+
+async function isRecentPassword(accountId, password) {
+  const matches = await Promise.all(recentPasswordHashes(accountId).map(hash => verifyPassword(password, hash)));
+  return matches.includes(true);
+}
+
+// moves the current password hash into the history, keeping only as many as the recent password check needs
+
+function archiveCurrentPassword(accountId) {
+  db.prepare("INSERT INTO password_history (account_id, password_hash) SELECT id, password_hash FROM accounts WHERE id = ?").run(accountId);
+  db.prepare(`
+    DELETE FROM password_history WHERE account_id = ? AND id NOT IN
+      (SELECT id FROM password_history WHERE account_id = ? ORDER BY id DESC LIMIT ?)
+  `).run(accountId, accountId, RECENT_PASSWORD_COUNT - 1);
+}
+
+// the token is checked again here because another request may have used it while the new password was hashing
+
+const resetPasswordTx = db.transaction((token, passwordHash) => {
+  const result = checkPasswordResetToken(token);
+  if (result.outcome !== "valid") return result;
+  db.prepare("UPDATE password_reset_tokens SET used_at = ? WHERE token_hash = ?").run(now(), sha256(token));
+  invalidatePasswordResetTokens(result.accountId);
+  archiveCurrentPassword(result.accountId);
+  db.prepare("UPDATE accounts SET password_hash = ?, updated_at = datetime('now') WHERE id = ?").run(passwordHash, result.accountId);
+  const sessionsRevoked = revokeAllSessions(result.accountId);
+  queueEmail(result.accountId, "password_changed");
+  return { outcome: "reset", accountId: result.accountId, sessionsRevoked };
+});
+
+async function resetPassword(token, newPassword) {
+  const passwordHash = await hashPassword(newPassword);
+  return resetPasswordTx(token, passwordHash);
+}
 
 // email outbox functions, used by the email worker
 
@@ -206,6 +301,10 @@ function revokeAccessToken(token) {
   db.prepare("DELETE FROM access_tokens WHERE token_hash = ?").run(sha256(token));
 }
 
+function revokeAllSessions(accountId) {
+  return db.prepare("DELETE FROM access_tokens WHERE account_id = ?").run(accountId).changes;
+}
+
 function clearExpiredTokens() {
   db.prepare("DELETE FROM access_tokens WHERE expires_at <= ?").run(new Date().toISOString());
 }
@@ -215,6 +314,7 @@ initSchema();
 module.exports = {
   db, verifyPassword, findAccountByEmail, findAccountById, registerAccount,
   createVerificationToken, verifyEmailToken, requestVerificationResend,
+  requestPasswordReset, createPasswordResetToken, checkPasswordResetToken, isRecentPassword, resetPassword,
   claimDueEmails, markEmailSent, markEmailSkipped, markEmailRetry, markEmailFailed, requeueStuckEmails,
-  issueAccessToken, findAccountByToken, revokeAccessToken, clearExpiredTokens
+  issueAccessToken, findAccountByToken, revokeAccessToken, revokeAllSessions, clearExpiredTokens
 };

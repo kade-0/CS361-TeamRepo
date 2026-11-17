@@ -15,12 +15,13 @@ using Microsoft.Data.Sqlite;
 // usage: [account service url] [--insecure] [--mail-dir <path>] [--db <path>]
 // --insecure accepts self-signed certificates, for local HTTPS testing only
 // --mail-dir is the service's dev inbox (MAIL_DIR), where verification emails are read from
-// --db is the service's accounts.db, only needed for the expired link test
+// --db is the service's accounts.db, only needed for the expired link tests
 string[] valueOptions = ["--mail-dir", "--db"];
 string? Option(string name) => args.SkipWhile(a => a != name).Skip(1).FirstOrDefault();
 var insecure = args.Contains("--insecure");
 var mailDir = Path.GetFullPath(Option("--mail-dir") ?? "../mail");
-var dbPath = Option("--db");
+var dbOption = Option("--db");
+var dbPath = dbOption == null ? null : Path.GetFullPath(dbOption);
 var baseUrl = (args.Where((a, i) => !a.StartsWith("--") && (i == 0 || !valueOptions.Contains(args[i - 1]))).FirstOrDefault() ?? "http://localhost:4000").TrimEnd('/');
 var baseUri = new Uri(baseUrl);
 
@@ -29,6 +30,10 @@ if (insecure) handler.ServerCertificateCustomValidationCallback = HttpClientHand
 using var http = new HttpClient(handler) { BaseAddress = baseUri };
 
 const string Password = "my-strong-password-1930@#!";
+const string NewPassword = "a-brand-new-password-4821!";
+const string VerifySubject = "Verify your email address";
+const string ResetSubject = "Reset your password";
+const string PasswordChangedSubject = "Your password was changed";
 const int MaxValueLength = 64;
 var tokenInLink = new Regex("#token=([A-Za-z0-9_-]+)");
 var passed = 0;
@@ -38,6 +43,15 @@ var log = new List<string>();
 
 Console.WriteLine($"Testing account service at {baseUrl}");
 Console.WriteLine($"Reading emails from {mailDir}");
+if (dbPath != null)
+{
+    if (!File.Exists(dbPath))
+    {
+        Console.WriteLine($"No database at {dbPath}. Relative paths start from the folder you run in (try --db ../accounts.db).");
+        return 1;
+    }
+    Console.WriteLine($"Using database {dbPath}");
+}
 try
 {
     await http.GetAsync("/v1/accounts/me");
@@ -288,7 +302,7 @@ await Test("Resend to a verified account sends no new link", async () =>
 
 await Test("Resend rejects an invalid email", async () =>
 {
-    var res = await Resend("not-an-email");
+    var res = await Resend(NewInvalidEmail());
     ExpectFieldErrors(res, "email");
 });
 
@@ -353,6 +367,197 @@ await Test("Logout revokes the token", async () =>
     var token = await Login(email, Password);
     ExpectStatus(await Send(HttpMethod.Post, "/v1/auth/logout", token: token), HttpStatusCode.NoContent);
     ExpectStatus(await Send(HttpMethod.Get, "/v1/accounts/me", token: token), HttpStatusCode.Unauthorized);
+});
+
+// password reset
+
+Section("Password reset");
+var resetEmail = NewEmail();
+string? resetRequestBody = null;
+string? resetLink = null;
+string? sessionBeforeReset = null;
+
+await Test("Reset request returns 202 with a message", async () =>
+{
+    await CreateActiveAccount(resetEmail);
+    sessionBeforeReset = await Login(resetEmail, Password);
+    var res = await RequestReset(resetEmail);
+    ExpectStatus(res, HttpStatusCode.Accepted);
+    Expect(!string.IsNullOrWhiteSpace(res.Json?["message"]?.GetValue<string>()), "response has no message");
+    resetRequestBody = res.Body;
+});
+
+await Test("Reset email is sent within 1 minute", async () =>
+{
+    resetLink = await WaitForResetToken(resetEmail, 0);
+});
+
+await Test("Reset token has at least 128 bits of randomness", async () =>
+{
+    var bits = FromBase64Url(resetLink!).Length * 8;
+    Note($"token decodes to {bits} bits");
+    Expect(bits >= 128, $"token is only {bits} bits");
+    await Task.CompletedTask;
+});
+
+await Test("Reset response is identical for unknown and unverified emails, and neither gets a link", async () =>
+{
+    var unknownEmail = NewEmail();
+    var unknown = await RequestReset(unknownEmail);
+    ExpectStatus(unknown, HttpStatusCode.Accepted);
+    ExpectEqual(resetRequestBody, unknown.Body, "unknown email response");
+    var pendingEmail = NewEmail();
+    ExpectStatus(await Send(HttpMethod.Post, "/v1/accounts", Registration(pendingEmail)), HttpStatusCode.Accepted);
+    var pending = await RequestReset(pendingEmail);
+    ExpectStatus(pending, HttpStatusCode.Accepted);
+    ExpectEqual(resetRequestBody, pending.Body, "unverified email response");
+    await Task.Delay(3000);
+    Note("(waited 3 s for the email worker)");
+    ExpectEqual(0, ResetTokens(unknownEmail).Count, "reset emails to the unknown email");
+    ExpectEqual(0, ResetTokens(pendingEmail).Count, "reset emails to the unverified account");
+});
+
+await Test("Reset requests take the same time for known and unknown emails", async () =>
+{
+    var known = new List<double>();
+    var unknown = new List<double>();
+    for (var i = 0; i < 5; i++)
+    {
+        var account = NewEmail();
+        await CreateActiveAccount(account, show: false);
+        foreach (var (to, times) in new[] { (account, known), (NewEmail(), unknown) })
+        {
+            var watch = Stopwatch.StartNew();
+            ExpectStatus(await RequestReset(to), HttpStatusCode.Accepted);
+            times.Add(watch.Elapsed.TotalMilliseconds);
+        }
+    }
+    double Median(List<double> times) => times.Order().ElementAt(times.Count / 2);
+    Note($"median {Median(known):F1} ms for active accounts, {Median(unknown):F1} ms for unknown emails (5 each)");
+    Expect(Math.Abs(Median(known) - Median(unknown)) < 25, "medians differ by 25 ms or more");
+});
+
+await Test("Reset rejects an invalid email", async () =>
+{
+    var res = await RequestReset(NewInvalidEmail());
+    ExpectFieldErrors(res, "email");
+});
+
+await Test("Reset is limited to 3 requests per hour per account", async () =>
+{
+    // every request comes from a different IP, so this is the per-account limit
+    var target = NewEmail();
+    for (var i = 1; i <= 3; i++)
+        ExpectStatus(await RequestReset(target), HttpStatusCode.Accepted);
+    var res = await RequestReset(target);
+    ExpectStatus(res, HttpStatusCode.TooManyRequests);
+    Expect(res.RetryAfter != null, "429 response has no Retry-After header");
+});
+
+await Test("Reset is limited to 10 requests per IP per 15 minutes", async () =>
+{
+    var ip = NewIp();
+    for (var i = 1; i <= 10; i++)
+    {
+        var ok = await RequestReset(NewEmail(), ip);
+        Expect(ok.Status != HttpStatusCode.TooManyRequests, $"request {i} was rate limited too early");
+    }
+    var res = await RequestReset(NewEmail(), ip);
+    ExpectStatus(res, HttpStatusCode.TooManyRequests);
+    Expect(res.RetryAfter != null, "429 response has no Retry-After header");
+});
+
+await Test("Valid reset link passes the check", async () =>
+{
+    ExpectStatus(await CheckResetLink(resetLink!), HttpStatusCode.OK);
+});
+
+await Test("Tampered reset link is rejected with an option to request a new one", async () =>
+{
+    var tampered = (resetLink![0] == 'A' ? 'B' : 'A') + resetLink![1..];
+    var res = await CheckResetLink(tampered);
+    ExpectStatus(res, HttpStatusCode.BadRequest);
+    ExpectCode(res, "token_invalid");
+    Expect(res.Json?["error"]?.GetValue<string>().Contains("Request a new one") == true, "message does not offer a new link");
+});
+
+await Test("New password that fails the policy is rejected with an explanation", async () =>
+{
+    var res = await ConfirmReset(resetLink!, "elevenchars");
+    ExpectFieldErrors(res, "newPassword");
+    Expect(res.Json?["fields"]?["newPassword"]?.GetValue<string>().Contains("12") == true, "message does not explain the length rule");
+});
+
+await Test("Current password is rejected as recently used", async () =>
+{
+    var res = await ConfirmReset(resetLink!, Password);
+    ExpectStatus(res, HttpStatusCode.BadRequest);
+    ExpectCode(res, "password_recently_used");
+});
+
+await Test("Rejected passwords don't use up the link", async () =>
+{
+    ExpectStatus(await CheckResetLink(resetLink!), HttpStatusCode.OK);
+});
+
+await Test("Valid reset changes the password", async () =>
+{
+    ExpectStatus(await ConfirmReset(resetLink!, NewPassword), HttpStatusCode.OK);
+    ExpectStatus(await Send(HttpMethod.Post, "/v1/auth/login", new { email = resetEmail, password = Password }), HttpStatusCode.Unauthorized);
+    await Login(resetEmail, NewPassword);
+});
+
+await Test("Reset logs out every existing session", async () =>
+{
+    ExpectStatus(await Send(HttpMethod.Get, "/v1/accounts/me", token: sessionBeforeReset), HttpStatusCode.Unauthorized);
+});
+
+await Test("Password changed email is sent within 1 minute", async () =>
+{
+    await WaitForEmail(resetEmail, PasswordChangedSubject, 0);
+});
+
+await Test("Used reset link is rejected", async () =>
+{
+    var res = await ConfirmReset(resetLink!, "yet-another-password-77");
+    ExpectStatus(res, HttpStatusCode.BadRequest);
+    ExpectCode(res, "token_used");
+    ExpectCode(await CheckResetLink(resetLink!), "token_used");
+});
+
+await Test("A new reset request invalidates earlier links", async () =>
+{
+    ExpectStatus(await RequestReset(resetEmail), HttpStatusCode.Accepted);
+    var older = await WaitForResetToken(resetEmail, 1);
+    ExpectStatus(await RequestReset(resetEmail), HttpStatusCode.Accepted);
+    resetLink = await WaitForResetToken(resetEmail, 2);
+    var res = await CheckResetLink(older);
+    ExpectStatus(res, HttpStatusCode.BadRequest);
+    ExpectCode(res, "token_invalid");
+});
+
+await Test("Previous password is rejected as recently used", async () =>
+{
+    var res = await ConfirmReset(resetLink!, Password);
+    ExpectStatus(res, HttpStatusCode.BadRequest);
+    ExpectCode(res, "password_recently_used");
+});
+
+await Test("Made-up reset link is rejected", async () =>
+{
+    var res = await ConfirmReset("not-a-real-token", "yet-another-password-77");
+    ExpectStatus(res, HttpStatusCode.BadRequest);
+    ExpectCode(res, "token_invalid");
+});
+
+await Test("Expired reset link is rejected and the password stays the same", async () =>
+{
+    if (dbPath == null) throw new SkipTest("pass --db <path to accounts.db> to run this test");
+    ExpireToken(resetLink!, "password_reset_tokens");
+    var res = await ConfirmReset(resetLink!, "yet-another-password-77");
+    ExpectStatus(res, HttpStatusCode.BadRequest);
+    ExpectCode(res, "token_expired");
+    await Login(resetEmail, NewPassword);
 });
 
 Console.WriteLine();
@@ -447,6 +652,9 @@ void ExpectFieldErrors(Response res, params string[] fields)
 
 string NewEmail() => $"test-{Guid.NewGuid():N}@example.com";
 
+// unique so repeated runs don't use up the per-account rate limit for the same bad address
+string NewInvalidEmail() => $"not-an-email-{Guid.NewGuid():N}";
+
 // each request gets its own fake client IP so tests don't use up each other's rate limit
 string NewIp() => $"10.{Random.Shared.Next(256)}.{Random.Shared.Next(256)}.{Random.Shared.Next(1, 255)}";
 
@@ -482,41 +690,78 @@ Task<Response> Verify(string token) => Send(HttpMethod.Post, "/v1/accounts/verif
 
 Task<Response> Resend(string to) => Send(HttpMethod.Post, "/v1/accounts/verify-email/resend", new { email = to });
 
+Task<Response> RequestReset(string to, string? ip = null) => Send(HttpMethod.Post, "/v1/auth/password-reset/request", new { email = to }, ip: ip);
+
+Task<Response> CheckResetLink(string token) => Send(HttpMethod.Post, "/v1/auth/password-reset/check", new { token });
+
+Task<Response> ConfirmReset(string token, string newPassword) => Send(HttpMethod.Post, "/v1/auth/password-reset/confirm", new { token, newPassword });
+
+// registers an account and verifies its email, so it can log in with Password
+
+async Task CreateActiveAccount(string to, bool show = true)
+{
+    ExpectStatus(await Send(HttpMethod.Post, "/v1/accounts", Registration(to), show: show), HttpStatusCode.Accepted);
+    var token = await WaitForVerificationToken(to, 0, show);
+    ExpectStatus(await Send(HttpMethod.Post, "/v1/accounts/verify-email", new { token }, show: show), HttpStatusCode.OK);
+}
+
 // mailbox helper functions, reading the json files the service writes to its dev inbox
 
-List<string> VerificationTokens(string to)
+// the text of every email sent to this address with this subject, oldest first
+
+List<string> Emails(string to, string subject)
 {
     if (!Directory.Exists(mailDir)) return [];
-    var tokens = new List<string>();
+    var texts = new List<string>();
     foreach (var file in Directory.GetFiles(mailDir, "*.json").Order())
     {
         JsonNode? mail;
         try { mail = JsonNode.Parse(File.ReadAllText(file)); } catch (Exception e) when (e is JsonException or IOException) { continue; }
         if (!string.Equals(mail?["to"]?.GetValue<string>(), to, StringComparison.OrdinalIgnoreCase)) continue;
-        var match = tokenInLink.Match(mail?["text"]?.GetValue<string>() ?? "");
-        if (match.Success) tokens.Add(match.Groups[1].Value);
+        if (mail?["subject"]?.GetValue<string>() != subject) continue;
+        texts.Add(mail?["text"]?.GetValue<string>() ?? "");
     }
-    return tokens;
+    return texts;
 }
 
-// waits up to a minute for a verification email beyond the ones already seen, and returns its token
+List<string> LinkTokens(string to, string subject) =>
+    Emails(to, subject).Select(text => tokenInLink.Match(text)).Where(m => m.Success).Select(m => m.Groups[1].Value).ToList();
 
-async Task<string> WaitForVerificationToken(string to, int alreadySeen)
+List<string> VerificationTokens(string to) => LinkTokens(to, VerifySubject);
+
+List<string> ResetTokens(string to) => LinkTokens(to, ResetSubject);
+
+// waits up to a minute for an email beyond the ones already seen, and returns its text
+
+async Task<string> WaitForEmail(string to, string subject, int alreadySeen, bool show = true)
 {
     var watch = Stopwatch.StartNew();
     while (watch.Elapsed < TimeSpan.FromMinutes(1))
     {
-        var tokens = VerificationTokens(to);
-        if (tokens.Count > alreadySeen)
+        var emails = Emails(to, subject);
+        if (emails.Count > alreadySeen)
         {
-            Note($"@ verification email to {to} arrived after {watch.ElapsedMilliseconds} ms");
-            Note($"  link token: {tokens[^1]}");
-            return tokens[^1];
+            if (show) Note($"@ \"{subject}\" email to {to} arrived after {watch.ElapsedMilliseconds} ms");
+            return emails[^1];
         }
         await Task.Delay(100);
     }
-    throw new TestFailure($"no verification email for {to} within 1 minute (looked in {mailDir})");
+    throw new TestFailure($"no \"{subject}\" email for {to} within 1 minute (looked in {mailDir})");
 }
+
+// like WaitForEmail, but returns the token in the email's link
+
+async Task<string> WaitForToken(string to, string subject, int alreadySeen, bool show = true)
+{
+    var match = tokenInLink.Match(await WaitForEmail(to, subject, alreadySeen, show));
+    Expect(match.Success, $"\"{subject}\" email has no link");
+    if (show) Note($"  link token: {match.Groups[1].Value}");
+    return match.Groups[1].Value;
+}
+
+Task<string> WaitForVerificationToken(string to, int alreadySeen, bool show = true) => WaitForToken(to, VerifySubject, alreadySeen, show);
+
+Task<string> WaitForResetToken(string to, int alreadySeen) => WaitForToken(to, ResetSubject, alreadySeen);
 
 byte[] FromBase64Url(string value)
 {
@@ -524,19 +769,19 @@ byte[] FromBase64Url(string value)
     return Convert.FromBase64String(base64.PadRight(base64.Length + (4 - base64.Length % 4) % 4, '='));
 }
 
-// moves a verification token's expiry into the past, straight in the service's database
+// moves a link token's expiry into the past, straight in the service's database
 
-void ExpireToken(string token)
+void ExpireToken(string token, string table = "verification_tokens")
 {
     var hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
     using var connection = new SqliteConnection($"Data Source={dbPath}");
     connection.Open();
     using var command = connection.CreateCommand();
-    command.CommandText = "UPDATE verification_tokens SET expires_at = $past WHERE token_hash = $hash";
+    command.CommandText = $"UPDATE {table} SET expires_at = $past WHERE token_hash = $hash";
     command.Parameters.AddWithValue("$past", DateTime.UtcNow.AddHours(-1).ToString("yyyy-MM-ddTHH:mm:ss.fffZ"));
     command.Parameters.AddWithValue("$hash", hash);
     Expect(command.ExecuteNonQuery() == 1, "token was not found in the database");
-    Note("@ moved the token's expiry 1 hour into the past in the database (as if 24 hours had passed)");
+    Note($"@ moved the token's expiry 1 hour into the past in {table} (as if the link had run out)");
 }
 
 async Task<string> Login(string loginEmail, string password)

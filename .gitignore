@@ -1,0 +1,8 @@
+cert.pem
+key.pem
+node_modules/
+accounts*
+package-lock.json
+TestProgram/bin
+TestProgram/obj
+mail/
