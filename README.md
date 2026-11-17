@@ -10,6 +10,6 @@ Sam - Worked on `analysis` and `reports`
 
 Garrett - Worked on `reports` and `accounts`
 
-Deon - Will work on `banking` and `reports` in a future revision. Was sick and communicated this with teammates.
+Deon - Made the test code for `reports`. Will work on `banking` in a revision. Was sick and communicated with teammates.
 
 ![Team Diagram Plan C](<Team Diagram – Plan C.png>)
