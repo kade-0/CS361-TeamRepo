@@ -1,7 +1,7 @@
 """Football analysis microservice. JSON only, no UI. See README.md for the API contract."""
 import os
 from flask import Flask, jsonify, request
-from analysis import SORT_KEYS, analyze_match, chronological, leaders, player_rows, sort_players
+from analysis import SORT_KEYS, analyze_match, chronological, leaders, live_dashboard, player_rows, sort_players
 from event_analysis import MAJOR, build_timeline
 from provider import ProviderError, get_provider
 
@@ -72,6 +72,13 @@ def create_app(provider=None):
         if not fixture:
             return error("match_not_found", f"No match with id {match_id}.", 404)
         return jsonify(analyze_match(fixture, prov.statistics(match_id), prov.events(match_id)))
+
+    @app.get("/v1/matches/<int:match_id>/dashboard")
+    def dashboard(match_id):
+        fixture = prov.fixture(match_id)
+        if not fixture:
+            return error("match_not_found", f"No match with id {match_id}.", 404)
+        return jsonify(live_dashboard(fixture, prov.events(match_id)))
 
     @app.get("/v1/matches/<int:match_id>/events")
     def events(match_id):

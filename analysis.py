@@ -60,10 +60,14 @@ def dominance(home, away):
             "method": "Weighted share of possession (30%), shots on target (35%), total shots (20%), corners (15%)."}
 
 
+def clock(elapsed, extra):
+    return f"{elapsed}'+{extra}'" if extra else f"{elapsed}'"
+
+
 def normalize_event(e):
     t = e.get("time") or {}
     el, extra = t.get("elapsed") or 0, t.get("extra") or 0
-    return {"minute": el, "extra": extra, "clock": f"{el}'+{extra}'" if extra else f"{el}'",
+    return {"minute": el, "extra": extra, "clock": clock(el, extra),
             "team": (e.get("team") or {}).get("name"), "team_id": (e.get("team") or {}).get("id"),
             "player": (e.get("player") or {}).get("name"), "player_id": (e.get("player") or {}).get("id"),
             "assist": (e.get("assist") or {}).get("name"), "assist_id": (e.get("assist") or {}).get("id"), "type": EVENT_TYPES.get(e.get("type"), "other"),
@@ -101,12 +105,17 @@ def _summary(match, stats_ok, dom, home, away):
             f"{t['shots_on_target']} shots on target out of {t['shots_total']}.")
 
 
+def match_info(fixture):
+    teams, st = fixture["teams"], fixture["fixture"]["status"]
+    el, extra = st.get("elapsed") or 0, st.get("extra") or 0
+    return {"id": fixture["fixture"]["id"], "league": fixture["league"]["name"], "status": st["short"],
+            "minute": el, "extra": extra, "clock": clock(el, extra),
+            "home": teams["home"]["name"], "away": teams["away"]["name"],
+            "home_score": fixture["goals"]["home"] or 0, "away_score": fixture["goals"]["away"] or 0}
+
+
 def analyze_match(fixture, stat_blocks, events):
-    teams = fixture["teams"]
-    match = {"id": fixture["fixture"]["id"], "league": fixture["league"]["name"],
-             "status": fixture["fixture"]["status"]["short"], "minute": fixture["fixture"]["status"].get("elapsed") or 0,
-             "home": teams["home"]["name"], "away": teams["away"]["name"],
-             "home_score": fixture["goals"]["home"] or 0, "away_score": fixture["goals"]["away"] or 0}
+    teams, match = fixture["teams"], match_info(fixture)
     hb, ab = _pick(stat_blocks, teams["home"], 0), _pick(stat_blocks, teams["away"], 1)
     ok = bool(hb and ab)
     home, away = (team_stats(hb), team_stats(ab)) if ok else (None, None)
@@ -115,6 +124,15 @@ def analyze_match(fixture, stat_blocks, events):
     return {"match": match, "statistics_available": ok, "teams": {"home": home, "away": away} if ok else None,
             "dominance": dom, "key_moments": [e for e in evs if is_key_moment(e)],
             "summary": _summary(match, ok, dom, home, away)}
+
+
+DASHBOARD_EVENT_KEYS = ("index", "clock", "minute", "extra", "team", "team_id", "type", "detail", "player", "player_id")
+
+
+def live_dashboard(fixture, raw_events):
+    """Score, clock and every feed event newest first, so a new event lands at the top of the list."""
+    evs = [{k: e[k] for k in DASHBOARD_EVENT_KEYS} for e in reversed(chronological(raw_events))]
+    return {"match": match_info(fixture), "count": len(evs), "events": evs}
 
 
 # ---------------------------------------------------------------- player analysis

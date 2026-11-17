@@ -18,10 +18,12 @@ python -m pytest            # 27 tests, no network or key needed
 | `/v1/matches/live` | `league` (optional, name substring) | `{count, matches:[{id, league, home, away, home_score, away_score, minute, status}]}` |
 | `/v1/matches/{id}/analysis` | `id` in path (required) | `{match, statistics_available, teams:{home,away}, dominance, key_moments[], summary}` |
 | `/v1/matches/{id}/players` | `id` in path; `team` (exact name), `player_id` (integer), `sort` (rating/goals/key_passes/shots, default rating), `limit` (1-50, default 10) optional | `{match_id, count, sorted_by, leaders, players:[...]}` |
+| `/v1/matches/{id}/dashboard` | `id` in path (required) | `{match:{id, league, status, minute, extra, clock, home, away, home_score, away_score}, count, events:[{index, clock, minute, extra, team, team_id, type, detail, player, player_id}]}` |
 | `/v1/matches/{id}/events` | `id` in path; `type` (goal/card/substitution/var/other), `team` (exact name), `player_id` (integer) optional | `{match_id, count, events:[{minute, extra, clock, team, team_id, player, player_id, assist, assist_id, type, detail}]}` |
 
 `teams.home/away` contain: `possession, shots_total, shots_on_target, shots_off_target, shots_blocked, shot_accuracy, passes_total, passes_accurate, pass_accuracy, fouls, corners, yellow_cards, red_cards, saves, xg` (`xg` is null when the provider has none).
 `players[]` each have: `player_id, name, team_id, team, position, minutes, rating, goals, assists, shots_total, shots_on_target, shot_accuracy, key_passes, passes_total, duels_total, duels_won, duel_win_rate, dribbles_attempted, dribbles_success, dribble_success_rate, tackles, interceptions, fouls_committed, fouls_drawn, yellow_cards, red_cards`. Players who did not play are omitted; `rating` is null if unrated. `leaders` names the standout player for rating, goals, assists, key_passes, shots, tackles, duel_win_rate (min 5 duels) and dribble_success_rate (min 3 dribbles); a leader is null if nobody qualifies.
+`dashboard.events` is newest first, so a new feed event appears at the top. `index` is the event's chronological position and never changes.
 `dominance`: `{home_share, away_share, verdict: home|away|balanced, method}`.
 
 ## Errors
