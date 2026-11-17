@@ -25,8 +25,17 @@ def report_route():
     lon = request.args.get("lon", type=float)
     report_type = request.args.get("type", default="all")
 
-    # 2. TODO: Check that we got usable coordinates.
-    
+    # 2. Check that we got usable coordinates.
+    #    type=float above turns a missing or non-numeric value into None.
+    if lat is None or lon is None:
+        return jsonify({"error": "lat and lon are required and must be numbers"}), 400
+
+    #    Written as "not (in range)" so NaN and infinity are rejected too.
+    if not -90 <= lat <= 90:
+        return jsonify({"error": "lat must be between -90 and 90"}), 400
+    if not -180 <= lon <= 180:
+        return jsonify({"error": "lon must be between -180 and 180"}), 400
+
     # 3. Build the report and send it back.
     try:
         report = get_report(lat, lon, report_type)

@@ -110,10 +110,11 @@ Example response (`type=all`, trimmed to one forecast period and one month):
 The climate section covers the 12 most recent months that the nearest active
 weather station has reported. Any value NCDC doesn't have is `null`.
 
-TODO: Errors:
+## Test
 
-- [ ] A missing or out-of-range `lat`/`lon`, or an unknown `type`, returns a `400` with an `error` message.
-- [x] If one data source fails, its section holds `{"source": ..., "error": ...}` and the rest of the report is still returned.
-- [x] If every requested data source fails, the report is returned with a `502`.
+```
+.venv\Scripts\Activate.ps1
+python -m unittest -v
+```
 
 ![UML Sequence Diagram](sequence_diagram.png)
