@@ -50,6 +50,11 @@ def get_account(access_token):
     print(res.status_code, res.json())
 ```
 
+## UML
+
+<img width="1383" height="1083" alt="image" src="https://github.com/user-attachments/assets/d6414f96-700e-4860-84a3-aa1a7e615584" />
+<img width="991" height="826" alt="image" src="https://github.com/user-attachments/assets/852b6644-ecfd-409a-be32-ba2b87ccb561" />
+
 # Requirements
 
 Email must be `name@domain.tld`, at most 254 characters. Must be unique.
