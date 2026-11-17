@@ -22,27 +22,25 @@ def get_report(lat, lon, report_type="all"):
 
     If a data source fails, its section holds {"source": ..., "error": ...}
     instead of data, so one failing source does not hide the other.
+
+    Raises ValueError if report_type is not one of VALID_REPORT_TYPES.
     """
-    
-    """
-    TODO: raise ValueError if report_type is invalid
-    """
+    if report_type not in VALID_REPORT_TYPES:
+        raise ValueError(
+            f"Invalid report_type {report_type!r}; "
+            f"must be one of {VALID_REPORT_TYPES}"
+        )
 
     report = {
         "location": {"lat": lat, "lon": lon},
         "report_type": report_type,
     }
 
-    """ 
-    Error handling: implement try/except safe fetch
-    feature here instead of get_weather or get_climate 
-    """
-
     if report_type in ("all", "weather"):
-        report["weather"] = get_weather(lat, lon)
+        report["weather"] = _safe_fetch("NWS", get_weather, lat, lon)
 
     if report_type in ("all", "climate"):
-        report["climate"] = get_climate(lat, lon)
+        report["climate"] = _safe_fetch("NCDC", get_climate, lat, lon)
 
     return report
 
@@ -53,4 +51,15 @@ def report_failed(report):
     return all("error" in section for section in sections)
 
 
-"""def _safe_fetch(source, fetch, lat, lon)"""
+def _safe_fetch(source, fetch, lat, lon):
+    """
+    Call fetch(lat, lon) and return its data. If the service raises a
+    ServiceError, return {"source": source, "error": <message>} instead.
+
+    Only ServiceError is caught, so genuine bugs (TypeError, KeyError, etc.)
+    still surface instead of being silently turned into error sections.
+    """
+    try:
+        return fetch(lat, lon)
+    except ServiceError as exc:
+        return {"source": source, "error": str(exc)}
