@@ -112,8 +112,8 @@ weather station has reported. Any value NCDC doesn't have is `null`.
 
 TODO: Errors:
 
-[ ] A missing or out-of-range `lat`/`lon`, or an unknown `type`, returns a `400` with an `error` message.
-[x] If one data source fails, its section holds `{"source": ..., "error": ...}` and the rest of the report is still returned.
-[x] If every requested data source fails, the report is returned with a `502`.
+- [ ] A missing or out-of-range `lat`/`lon`, or an unknown `type`, returns a `400` with an `error` message.
+- [x] If one data source fails, its section holds `{"source": ..., "error": ...}` and the rest of the report is still returned.
+- [x] If every requested data source fails, the report is returned with a `502`.
 
 ![UML Sequence Diagram](sequence_diagram.png)
