@@ -2,6 +2,54 @@
 
 This microservice handles a database for account registration, and management.
 
+## How to send/receive data
+
+### Sending
+
+Send an HTTP request to an endpoint below. Send the body as JSON with the header `Content-Type: application/json`. 
+Endpoints that need a logged-in user also need the header `Authorization: Bearer <accessToken>`, where the token comes from the login response.
+
+```python
+import requests
+
+BASE_URL = "http://localhost:4000"
+
+email = "test@example.com"
+password = "my-strong-password-1930"
+
+def register():
+    res = requests.post(f"{BASE_URL}/v1/accounts", json={
+        "email": email,
+        "password": password,
+        "displayName": "Test",
+    })
+    print(res.status_code, res.json())
+
+
+def login():
+    res = requests.post(f"{BASE_URL}/v1/auth/login", json={
+        "email": email,
+        "password": password,
+    })
+    print(res.status_code, res.json())
+    return res.json().get("accessToken")
+```
+
+## Receiving
+
+Every response comes back over the same HTTP connection as the request. Check the status code first, then read the JSON body (a 204 has no body).
+
+```python
+# ... (code from send)
+
+def get_account(access_token):
+    res = requests.get(
+        f"{BASE_URL}/v1/accounts/me",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    print(res.status_code, res.json())
+```
+
 # Requirements
 
 Email must be `name@domain.tld`, at most 254 characters. Must be unique.
