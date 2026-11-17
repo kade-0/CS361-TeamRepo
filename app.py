@@ -13,7 +13,7 @@ Then call it with:
 
 from flask import Flask, jsonify, request
 
-from report import get_report
+from report import get_report, report_failed
 
 app = Flask(__name__)
 
@@ -25,15 +25,17 @@ def report_route():
     lon = request.args.get("lon", type=float)
     report_type = request.args.get("type", default="all")
 
-    # 2. Check that we got usable coordinates.
-    if lat is None or lon is None:
-        return jsonify({"error": "lat and lon are required numbers"}), 400
-
+    # 2. TODO: Check that we got usable coordinates.
+    
     # 3. Build the report and send it back.
     try:
         report = get_report(lat, lon, report_type)
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
+
+    # 4. If no data source worked, tell the caller the upstream APIs failed.
+    if report_failed(report):
+        return jsonify(report), 502
 
     return jsonify(report)
 
